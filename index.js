@@ -92,30 +92,27 @@ app.get('/hour', (req, res) => {
 
 // ---------- /insert/ (MongoDB) ----------
 app.post('/insert', async (req, res) => {
-  const { login, password, URL } = req.body;
+  const { login, password, URL } = req.body || {};
+  if (!URL) { res.status(400); return sendText(res, 'no URL'); }
   let conn;
   try {
     const mongoose = (await import('mongoose')).default; // загружается только здесь
     const userSchema = new mongoose.Schema({ login: String, password: String });
-    conn = mongoose.createConnection(URL, { useNewUrlParser: true, useUnifiedTopology: true });
-    await new Promise((ok, fail) => { conn.once('open', ok); conn.once('error', fail); });
+    conn = mongoose.createConnection(URL, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 15000
+    });
+    await conn; // ждём подключения; ошибка попадёт в catch, а не уронит сервер
     const User = conn.model('User', userSchema, 'users'); // коллекция users
     await User.create({ login, password });
     sendText(res, 'ok');
   } catch (e) {
+    console.error('insert error:', e.message);
     res.status(500); sendText(res, 'error: ' + e.message);
   } finally {
     if (conn) conn.close().catch(() => {});
   }
-});
-
-// ---------- /zipper ----------
-app.post('/zipper', upload.any(), (req, res) => {
-  const file = (req.files || [])[0];
-  if (!file) return res.status(400).type('text/plain').send('no file');
-  res.set('Content-Type', 'application/gzip');
-  res.set('Content-Disposition', 'attachment; filename="result.gz"');
-  res.send(zlib.gzipSync(file.buffer));
 });
 
 // ---------- /size2json/ ----------
