@@ -3,72 +3,142 @@ import multer from 'multer';
 import crypto from 'crypto';
 import zlib from 'zlib';
 import forge from 'node-forge';
+import mongoose from 'mongoose';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const LOGIN = 'katyaritm';
 
-// ---------- CORS ----------
+// ---------- Парсеры тела (для /insert/ и /result4/) ----------
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(express.text());
+
+// ---------- CORS для всех маршрутов ----------
 app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
-  res.set('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.set('Access-Control-Allow-Headers', '*');
-  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.set('Access-Control-Allow-Headers',
+    'x-test,ngrok-skip-browser-warning,Content-Type,Accept,Access-Control-Allow-Headers');
+  if (req.path === '/') res.set('Access-Control-Allow-Methods', '*'); // требование задания 1
+  // /result4/ должен отвечать одинаково на все методы, включая OPTIONS
+  if (req.method === 'OPTIONS' && !req.path.startsWith('/result4')) return res.sendStatus(204);
   next();
 });
 
-// ---------- /login и /login/ ----------
-app.get('/login', (req, res) => {
-  res.type('text/plain').send(LOGIN);
+// Отдаёт текст ровно с "text/plain; charset=UTF-8" (Express сам переписал бы в utf-8)
+function sendText(res, text, type = 'text/plain; charset=UTF-8') {
+  res.set('Content-Type', type);
+  res.end(text);
+}
+
+// ---------- Неделя 1: корень ----------
+app.get('/', (req, res) => {
+  res.set('X-Author', LOGIN);
+  sendText(res, LOGIN);
 });
 
-// ---------- Задание 1: /hour ----------
+// ---------- /login и /login/ ----------
+app.get('/login', (req, res) => sendText(res, LOGIN));
+
+// ---------- Неделя 2: /sample/ ----------
+app.get('/sample', (req, res) => {
+  sendText(res, 'function task(x) { return x * this * this; }');
+});
+
+// ---------- Неделя 3: /promise/ ----------
+app.get('/promise', (req, res) => {
+  sendText(res,
+    "function task(x) { return new Promise((resolve, reject) => x < 18 ? resolve('yes') : reject('no')); }");
+});
+
+// ---------- Неделя 3: /fetch/ ----------
+app.get('/fetch', (req, res) => {
+  sendText(res, `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>fetch</title></head>
+<body>
+  <input id="inp">
+  <button id="bt">Go</button>
+  <script>
+    document.getElementById('bt').addEventListener('click', async () => {
+      const inp = document.getElementById('inp');
+      const r = await fetch(inp.value);
+      inp.value = await r.text();
+    });
+  </script>
+</body>
+</html>`, 'text/html; charset=UTF-8');
+});
+
+// ---------- Неделя 4: /result4/ (все методы одинаково) ----------
+app.all('/result4', (req, res) => {
+  res.json({
+    message: LOGIN,
+    'x-result': req.get('x-test'),
+    'x-body': req.body
+  });
+});
+
+// ---------- /hour ----------
 app.get('/hour', (req, res) => {
   const hour = new Intl.DateTimeFormat('ru-RU', {
-    timeZone: 'Europe/Moscow',
-    hour: '2-digit',
-    hourCycle: 'h23'
+    timeZone: 'Europe/Moscow', hour: '2-digit', hourCycle: 'h23'
   }).format(new Date());
-  res.type('text/plain').send(hour.padStart(2, '0'));
+  sendText(res, hour.padStart(2, '0'));
 });
 
-// ---------- Задание 2: /zipper ----------
+// ---------- /insert/ (MongoDB) ----------
+const userSchema = new mongoose.Schema({ login: String, password: String });
+
+app.post('/insert', async (req, res) => {
+  const { login, password, URL } = req.body;
+  let conn;
+  try {
+    conn = mongoose.createConnection(URL, { useNewUrlParser: true, useUnifiedTopology: true });
+    await new Promise((ok, fail) => { conn.once('open', ok); conn.once('error', fail); });
+    const User = conn.model('User', userSchema, 'users'); // коллекция users
+    await User.create({ login, password });
+    sendText(res, 'ok');
+  } catch (e) {
+    res.status(500); sendText(res, 'error: ' + e.message);
+  } finally {
+    if (conn) conn.close().catch(() => {});
+  }
+});
+
+// ---------- /zipper ----------
 app.post('/zipper', upload.any(), (req, res) => {
   const file = (req.files || [])[0];
   if (!file) return res.status(400).type('text/plain').send('no file');
-  const gz = zlib.gzipSync(file.buffer);
   res.set('Content-Type', 'application/gzip');
   res.set('Content-Disposition', 'attachment; filename="result.gz"');
-  res.send(gz);
+  res.send(zlib.gzipSync(file.buffer));
 });
 
-// ---------- Задание 3: /size2json/ ----------
+// ---------- /size2json/ ----------
 app.post('/size2json', upload.any(), (req, res) => {
   const file = (req.files || []).find(f => f.fieldname === 'image') || (req.files || [])[0];
   if (!file) return res.status(400).json({ error: 'no image' });
   const b = file.buffer;
-  // PNG: сигнатура 8 байт, затем чанк IHDR; ширина — байты 16–19, высота — 20–23
-  const pngSig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  if (b.length < 24 || !b.subarray(0, 8).equals(pngSig)) {
-    return res.status(400).json({ error: 'not png' });
-  }
+  const sig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  if (b.length < 24 || !b.subarray(0, 8).equals(sig)) return res.status(400).json({ error: 'not png' });
   res.json({ width: b.readUInt32BE(16), height: b.readUInt32BE(20) });
 });
 
-// ---------- Задание 4: /id/:n ----------
+// ---------- /id/:n ----------
 app.get('/id/:n', async (req, res) => {
   try {
-    // GET без тела и без заголовка Content-Type
     const r = await fetch('https://nd.kodaktor.ru/users/' + encodeURIComponent(req.params.n));
     const data = await r.json();
-    res.type('text/plain').send(String(data.login));
+    sendText(res, String(data.login));
   } catch (e) {
-    res.status(500).type('text/plain').send('error: ' + e.message);
+    res.status(500); sendText(res, 'error: ' + e.message);
   }
 });
 
-// ---------- Задание с расшифровкой: /decypher ----------
+// ---------- /decypher ----------
 function getField(req, name) {
   const file = (req.files || []).find(f => f.fieldname === name);
   if (file) return file.buffer;
@@ -79,8 +149,7 @@ function getField(req, name) {
 function decrypt(keyPem, data) {
   try {
     return crypto.privateDecrypt(
-      { key: keyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING },
-      data
+      { key: keyPem, padding: crypto.constants.RSA_PKCS1_OAEP_PADDING }, data
     ).toString('utf8');
   } catch (_) {}
   const pk = forge.pki.privateKeyFromPem(keyPem);
@@ -92,12 +161,11 @@ app.post('/decypher', upload.any(), (req, res) => {
     const key = getField(req, 'key');
     const secret = getField(req, 'secret');
     if (!key || !secret) return res.status(400).type('text/plain').send('need key and secret');
-    const secretText = secret.toString('utf8').trim();
-    const isBase64 = /^[A-Za-z0-9+/=\s]+$/.test(secretText);
-    const data = isBase64 ? Buffer.from(secretText, 'base64') : secret;
-    res.type('text/plain').send(decrypt(key.toString('utf8'), data));
+    const s = secret.toString('utf8').trim();
+    const data = /^[A-Za-z0-9+/=\s]+$/.test(s) ? Buffer.from(s, 'base64') : secret;
+    sendText(res, decrypt(key.toString('utf8'), data));
   } catch (e) {
-    res.status(500).type('text/plain').send('decrypt error: ' + e.message);
+    res.status(500); sendText(res, 'decrypt error: ' + e.message);
   }
 });
 
