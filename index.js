@@ -3,29 +3,39 @@ import multer from 'multer';
 import crypto from 'crypto';
 import zlib from 'zlib';
 import forge from 'node-forge';
-import mongoose from 'mongoose';
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const LOGIN = 'katyaritm';
 
-// ---------- Парсеры тела (для /insert/ и /result4/) ----------
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
-app.use(express.text());
-
-// ---------- CORS для всех маршрутов ----------
+// ---------- CORS для всех маршрутов (идёт первым) ----------
 app.use((req, res, next) => {
   res.set('Access-Control-Allow-Origin', '*');
   res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   res.set('Access-Control-Allow-Headers',
     'x-test,ngrok-skip-browser-warning,Content-Type,Accept,Access-Control-Allow-Headers');
-  if (req.path === '/') res.set('Access-Control-Allow-Methods', '*'); // требование задания 1
+  if (req.path === '/') res.set('Access-Control-Allow-Methods', '*'); // задание 1
   // /result4/ должен отвечать одинаково на все методы, включая OPTIONS
   if (req.method === 'OPTIONS' && !req.path.startsWith('/result4')) return res.sendStatus(204);
   next();
 });
+
+// ---------- Неделя 4: /result4/ — ДО общих парсеров ----------
+// Тело читается сырой строкой при любом Content-Type
+app.all('/result4', express.text({ type: () => true }), (req, res) => {
+  const body = typeof req.body === 'string' ? req.body : '';
+  res.setHeader('Content-Type', 'application/json'); // ровно application/json, без charset
+  res.end(JSON.stringify({
+    message: LOGIN,
+    'x-result': req.get('x-test') ?? '',
+    'x-body': body
+  }));
+});
+
+// ---------- Общие парсеры тела (для /insert/ и прочих) ----------
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
 // Отдаёт текст ровно с "text/plain; charset=UTF-8" (Express сам переписал бы в utf-8)
 function sendText(res, text, type = 'text/plain; charset=UTF-8') {
@@ -72,15 +82,6 @@ app.get('/fetch', (req, res) => {
 </html>`, 'text/html; charset=UTF-8');
 });
 
-// ---------- Неделя 4: /result4/ (все методы одинаково) ----------
-app.all('/result4', (req, res) => {
-  res.json({
-    message: LOGIN,
-    'x-result': req.get('x-test'),
-    'x-body': req.body
-  });
-});
-
 // ---------- /hour ----------
 app.get('/hour', (req, res) => {
   const hour = new Intl.DateTimeFormat('ru-RU', {
@@ -90,12 +91,12 @@ app.get('/hour', (req, res) => {
 });
 
 // ---------- /insert/ (MongoDB) ----------
-const userSchema = new mongoose.Schema({ login: String, password: String });
-
 app.post('/insert', async (req, res) => {
   const { login, password, URL } = req.body;
   let conn;
   try {
+    const mongoose = (await import('mongoose')).default; // загружается только здесь
+    const userSchema = new mongoose.Schema({ login: String, password: String });
     conn = mongoose.createConnection(URL, { useNewUrlParser: true, useUnifiedTopology: true });
     await new Promise((ok, fail) => { conn.once('open', ok); conn.once('error', fail); });
     const User = conn.model('User', userSchema, 'users'); // коллекция users
@@ -130,6 +131,7 @@ app.post('/size2json', upload.any(), (req, res) => {
 // ---------- /id/:n ----------
 app.get('/id/:n', async (req, res) => {
   try {
+    // GET без тела и без заголовка Content-Type
     const r = await fetch('https://nd.kodaktor.ru/users/' + encodeURIComponent(req.params.n));
     const data = await r.json();
     sendText(res, String(data.login));
