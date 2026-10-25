@@ -33,6 +33,23 @@ app.all('/result4', express.text({ type: () => true }), (req, res) => {
   }));
 });
 
+// ---------- Неделя 8: /wordpress/ — прокси к вашему экземпляру WordPress ----------
+// Адрес WordPress задаётся переменной окружения WP_URL (например, https://my-wp.example.ru).
+// Прокси стоит ДО парсеров тела, чтобы POST-запросы доходили до WordPress без изменений.
+if (process.env.WP_URL) {
+  try {
+    const { createProxyMiddleware } = await import('http-proxy-middleware');
+    app.use('/wordpress', createProxyMiddleware({ target: process.env.WP_URL, changeOrigin: true }));
+    console.log('WordPress proxy -> ' + process.env.WP_URL);
+  } catch (e) {
+    console.error('WordPress proxy disabled:', e.message);
+  }
+} else {
+  app.use('/wordpress', (req, res) => {
+    res.status(503); sendText(res, 'WordPress is not configured: set WP_URL');
+  });
+}
+
 // ---------- Общие парсеры тела (для /insert/ и прочих) ----------
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
@@ -115,6 +132,97 @@ app.post('/insert', async (req, res) => {
   }
 });
 
+// ---------- Неделя 8: /render/ — рендер pug-шаблона ----------
+app.post('/render', async (req, res) => {
+  try {
+    const addr = req.query.addr;
+    if (!addr) { res.status(400); return sendText(res, 'no addr'); }
+    let data = req.body;
+    if (typeof data === 'string') data = JSON.parse(data);
+    const { random2, random3 } = data || {};
+    const pug = (await import('pug')).default;
+    const tpl = await (await fetch(addr)).text();
+    const html = pug.render(tpl, { random2, random3 });
+    sendText(res, html, 'text/html; charset=UTF-8');
+  } catch (e) {
+    console.error('render error:', e.message);
+    res.status(500); sendText(res, 'error: ' + e.message);
+  }
+});
+
+// ---------- Неделя 9: /test/ — щёлкнуть по #bt и прочитать #inp ----------
+async function clickWithPuppeteer(url) {
+  const puppeteer = (await import('puppeteer')).default;
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+  });
+  try {
+    const page = await browser.newPage();
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+    await page.waitForSelector('#bt', { timeout: 10000 });
+    const before = await page.$eval('#inp', el => el.value);
+    await page.click('#bt');
+    await page.waitForFunction(
+      prev => { const v = document.querySelector('#inp').value; return v !== '' && v !== prev; },
+      { timeout: 10000 }, before
+    ).catch(() => {});
+    return await page.$eval('#inp', el => el.value);
+  } finally {
+    await browser.close();
+  }
+}
+
+// Запасной вариант без браузера: исполняет скрипты страницы в jsdom
+async function clickWithJsdom(url) {
+  const { JSDOM, VirtualConsole } = await import('jsdom');
+  const html = await (await fetch(url)).text();
+  const dom = new JSDOM(html, {
+    url, runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
+    virtualConsole: new VirtualConsole()
+  });
+  const win = dom.window;
+  if (!win.fetch) win.fetch = fetch; // jsdom не умеет fetch
+  await new Promise(r => {
+    if (win.document.readyState === 'complete') r();
+    else win.addEventListener('load', r);
+    setTimeout(r, 5000);
+  });
+  const inp = win.document.getElementById('inp');
+  const before = inp.value;
+  win.document.getElementById('bt').click();
+  for (let i = 0; i < 50 && (inp.value === '' || inp.value === before); i++) {
+    await new Promise(r => setTimeout(r, 100));
+  }
+  const value = inp.value;
+  win.close();
+  return value;
+}
+
+app.get('/test', async (req, res) => {
+  const url = req.query.URL;
+  if (!url) { res.status(400); return sendText(res, 'no URL'); }
+  try {
+    sendText(res, String(await clickWithPuppeteer(url)));
+  } catch (e) {
+    console.error('puppeteer failed, using jsdom:', e.message);
+    try {
+      sendText(res, String(await clickWithJsdom(url)));
+    } catch (e2) {
+      res.status(500); sendText(res, 'error: ' + e2.message);
+    }
+  }
+});
+
+// ---------- /zipper ----------
+app.post('/zipper', upload.any(), (req, res) => {
+  const file = (req.files || [])[0];
+  if (!file) return res.status(400).type('text/plain').send('no file');
+  res.set('Content-Type', 'application/gzip');
+  res.set('Content-Disposition', 'attachment; filename="result.gz"');
+  res.send(zlib.gzipSync(file.buffer));
+});
+
 // ---------- /size2json/ ----------
 app.post('/size2json', upload.any(), (req, res) => {
   const file = (req.files || []).find(f => f.fieldname === 'image') || (req.files || [])[0];
@@ -167,6 +275,10 @@ app.post('/decypher', upload.any(), (req, res) => {
     res.status(500); sendText(res, 'decrypt error: ' + e.message);
   }
 });
+
+// Страховка: необработанная ошибка не должна ронять весь сервер
+process.on('unhandledRejection', e => console.error('unhandledRejection:', e && e.message));
+process.on('uncaughtException', e => console.error('uncaughtException:', e && e.message));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => console.log('Listening on ' + PORT));
